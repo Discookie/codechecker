@@ -65,10 +65,30 @@ def change_args_to_command_in_comp_db(compile_commands: List[Dict]):
     """
     for cc in compile_commands:
         if 'command' not in cc:
-            # TODO: shlex.join(cmd) would be more elegant after upgrading to
-            # Python 3.8.
-            cc['command'] = ' '.join(map(shlex.quote, cc['arguments']))
+            cc['command'] = shlex.join(cc['arguments'])
             del cc['arguments']
+
+
+def make_comp_db_paths_absolute(compile_commands: List[Dict], db_dir: str):
+    """
+    CodeChecker relies on absolute paths for running analyses and filtering
+    source files. Certain build systems such as Chromium and V8 generate
+    compilation database files containing relative paths, to all files referred
+    in the database entry.
+    intercept-build does not produce relative paths.
+    """
+    for cc in compile_commands:
+        for key in cc:
+            if not isinstance(cc[key], str):
+                continue
+
+            args = shlex.split(cc[key])
+            # Only the first element is used by CodeChecker. We assume that the
+            # file is in the path if it does not contain a directory.
+            # TODO: Resolve files in the PATH.
+            if not os.path.isabs(args[0]) and '/' in args[0]:
+                args[0] = os.path.realpath(os.path.join(db_dir, args[0]))
+                cc[key] = shlex.join(args)
 
 
 def find_all_compilation_databases(path: str) -> List[str]:
@@ -121,7 +141,7 @@ def is_c_lang_source_file(source_file_path: str) -> bool:
         os.path.splitext(source_file_path)[1] in C_CPP_OBJC_OBJCPP_EXTS
 
 
-def find_build_actions_for_file(file_path: str) -> List[Dict]:
+def find_build_actions_for_file(file_path: str) -> tuple[List[Dict], str]:
     """
     Find the corresponding compilation database belonging to the given
     source file and return a list of build actions that describe its
@@ -132,9 +152,13 @@ def find_build_actions_for_file(file_path: str) -> List[Dict]:
     if comp_db is None:
         return []
 
-    return list(filter(
+    build_actions = list(filter(
         build_action_describes_file(file_path),
         load_json(comp_db)))
+    db_dir = os.path.dirname(comp_db)
+
+    make_comp_db_paths_absolute(build_actions, db_dir)
+    return build_actions
 
 
 def gather_compilation_database(analysis_input: str) -> Optional[List[Dict]]:
@@ -175,7 +199,8 @@ def gather_compilation_database(analysis_input: str) -> Optional[List[Dict]]:
     build_actions = load_json(analysis_input, display_warning=False)
 
     if build_actions is not None:
-        pass
+        db_dir = os.path.dirname(analysis_input)
+        make_comp_db_paths_absolute(build_actions, db_dir)
 
     # Case 2: analysis_input is a C/C++/Obj-C source file.
 
@@ -192,6 +217,8 @@ def gather_compilation_database(analysis_input: str) -> Optional[List[Dict]]:
 
         for comp_db_file in compilation_database_files:
             comp_db = load_json(comp_db_file)
+            db_dir = os.path.dirname(comp_db_file)
+            make_comp_db_paths_absolute(comp_db, db_dir)
 
             if not comp_db:
                 continue
